@@ -26,11 +26,18 @@ class Actor(nn.Module):
         return action
     
     def calculateLoss(self, v_t, v_t_plus_1):
+        # actor_loss ver1
         log_probs = torch.cat(self.log_probs)
         returns = self.calc_returns()
         ad = (returns - v_t)
         actor_loss = -(log_probs*ad.detach()).sum()
+        return actor_loss
 
+        # actor_loss ver2
+        returns = self.calc_returns()[0:-1]
+        log_probs = torch.cat(self.log_probs[0:-1])
+        advantages = returns + self.gamma*v_t_plus_1 - v_t
+        actor_loss = - (log_probs * advantages.detach()).sum()
         return actor_loss
 
     def calc_returns(self):
@@ -68,7 +75,7 @@ class Critic(nn.Module):
     def calculateLoss(self):
         v_t = torch.cat(self.predicted_state_values)
         returns = self.calc_returns()
-        v_t_plus_1 = torch.cat(self.predicted_state_values[1::])
+        v_t_plus_1 = torch.cat(self.predicted_state_values[1::]) #1/2かけてもどちらでも...
         value_loss = ((v_t-returns).pow(2)).sum()
         return value_loss, v_t, v_t_plus_1
 
