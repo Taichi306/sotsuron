@@ -1,7 +1,3 @@
-# Actor loss = - (log_probs*advantage).sum()
-# Critic loss = ((v_t-returns).pow(2)).sum()
-# advantage = (returns - v_t)
-
 class Actor(nn.Module):
     def __init__(self, state_size, action_size, gamma, device):
         super(Actor, self).__init__()
@@ -34,11 +30,11 @@ class Actor(nn.Module):
         return actor_loss
 
         # actor_loss ver2
-        returns = self.calc_returns()[0:-1]
-        log_probs = torch.cat(self.log_probs[0:-1])
-        advantages = returns + self.gamma*v_t_plus_1 - v_t
-        actor_loss = - (log_probs * advantages.detach()).sum()
-        return actor_loss
+        # returns = self.calc_returns()[0:-1]
+        # log_probs = torch.cat(self.log_probs[0:-1])
+        # advantages = returns + self.gamma*v_t_plus_1 - v_t
+        # actor_loss = - (log_probs * advantages.detach()).sum()
+        # return actor_loss
 
     def calc_returns(self):
         R = 0
@@ -51,7 +47,6 @@ class Actor(nn.Module):
     def clearMemory(self):
         del self.log_probs[:]
         del self.rewards[:]
-
 
 class Critic(nn.Module):
     def __init__(self, state_size, action_size, gamma, device):
@@ -75,7 +70,7 @@ class Critic(nn.Module):
     def calculateLoss(self):
         v_t = torch.cat(self.predicted_state_values)
         returns = self.calc_returns()
-        v_t_plus_1 = torch.cat(self.predicted_state_values[1::]) #1/2かけてもどちらでも...
+        v_t_plus_1 = (1/2) * torch.cat(self.predicted_state_values[1::]) #1/2かけてもどちらでも...
         value_loss = ((v_t-returns).pow(2)).sum()
         return value_loss, v_t, v_t_plus_1
 
@@ -91,56 +86,87 @@ class Critic(nn.Module):
         del self.predicted_state_values[:]
         del self.rewards[:]
 
+# PuyoPuyoEndlessSmall-v2 settings
+env = gym.make('PuyoPuyoEndlessSmall-v2')
+OBSERVATION_SPACE = 84
+ACTION_SPACE = env.action_space.n
+LEARNING_RATE = 0.0001
+GAMMA = 0.90
 
-env = gym.make("CartPole-v0")
-state_size = env.observation_space.shape[0]
-action_size = env.action_space.n
-lr = 0.0001
-gamma = 0.99
-n_episodes = 300
+state_size = OBSERVATION_SPACE
+action_size = ACTION_SPACE
+lr = LEARNING_RATE
+gamma = GAMMA
+n_episodes = 20000
+n_steps = 15
 
-
-def calc_returns(rewards):
-    R = 0
-    returns = []
-    for reward in rewards[::-1]:
-        R = reward + 0.99 * R
-        returns.insert(0, R)
-    return returns
-
-def train_separate_networks(actor, critic, n_episodes):
-    actor_optim = optim.Adam(actor.parameters())
-    critic_optim = optim.Adam(critic.parameters())
-
+# 学習
+def train_actor_critic_separate_networks_puyo(actor, critic, actor_optimizer, critic_optimizer, n_episodes, n_steps):
+    total_rewards = []
+    total_max_chain = []
+    total_chain_cnt = []
     for iter in range(n_episodes):
-        display_reward = 0
         env.reset()
-        state = env.reset()
+        state = to_edited_observation(env.reset())
+        episode_display_rewards = 0
+        episode_max_chain_length = 0
+        episode_chain_cnt = 0
 
-        for step in count():
+        for step in range(n_steps):
             state = torch.FloatTensor(state).to(device)
+            # 現在のvalueを推定
             critic(state)
-            next_state, reward, done, _ = env.step(actor(state).cpu().numpy())
-            display_reward += reward
-            actor.rewards.append(torch.tensor([reward], dtype=torch.float, device=device))
-            critic.rewards.append(torch.tensor([reward], dtype=torch.float, device=device))
+            next_state, reward, done, _ = env.step(actor(state))
 
-            state = next_state
+            if reward == -1: # 終了条件の時, この時done=True(ペナルティ)
+                reward = -1
+            if reward == 0: # 1ターンのコスト
+                reward = 0
+            if reward > 0: # 連鎖したときの条件
+                chain_length = calc_chain_length_small_and_wide_env(reward)
+                if episode_max_chain_length < chain_length:
+                    episode_max_chain_length = chain_length
+                # reward = chain_length
+                episode_chain_cnt += 1
 
-            if done:
+            # 両ネットワークにrewardを保存
+            actor.rewards.append(reward)
+            critic.rewards.append(reward)
+            # stateの更新
+            state = to_edited_observation(next_state)
+
+            if done: # reward=-10と上書きしている
+                break
+            if step == n_steps-1: # 1-episodeの終端条件
                 break
         
-        actor_optim.zero_grad()
-        critic_optim.zero_grad()
 
-        critic_loss, v_t, v_t_plus_1  = critic.calculateLoss()
-        actor_loss = actor.calculateLoss(v_t, v_t_plus_1)
+        # 記録
+        episode_returns = sum(actor.rewards)
+        total_rewards.append(episode_returns)
+        total_max_chain.append(episode_max_chain_length)
+        total_chain_cnt.append(episode_chain_cnt)
+        
+        actor_optimizer.zero_grad()
+        critic_optimizer.zero_grad()
+
+        critic_loss, v_t, v_t_plus_1 = critic.calculateLoss()
+
         critic_loss.backward()
+        critic_optimizer.step()
+        actor_loss = actor.calculateLoss(v_t, v_t_plus_1)
         actor_loss.backward()
+        actor_optimizer.step()
 
-        actor_optim.step()
-        critic_optim.step()
-
-        print(f'episode:{iter}, loss:{actor_loss}, sum_reward:{display_reward}')
-        actor.clearMemory()
+        print(f'episode:{iter}, loss:{actor_loss+critic_loss}, max_chain:{episode_max_chain_length}\
+        total_rewards:{episode_returns}, episode_chain_cnt:{episode_chain_cnt}')
         critic.clearMemory()
+        actor.clearMemory()
+    
+    return total_rewards, total_max_chain, total_chain_cnt
+
+actor = Actor(state_size, action_size, gamma, device)
+critic = Critic(state_size, action_size, gamma, device)
+actor_optimizer = optim.Adam(actor.parameters(), lr=lr)
+critic_optimizer = optim.Adam(critic.parameters(), lr=lr)
+total_rewards, total_max_chain, total_chain_cnt = train_actor_critic_separate_networks_puyo(actor, critic, actor_optimizer, critic_optimizer, n_episodes, n_steps)
